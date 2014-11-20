@@ -8,3 +8,4 @@ refs
 *.snk
 /build/Debug
 /build/Release
+_ReSharper*/
