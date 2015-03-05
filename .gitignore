@@ -9,3 +9,4 @@ refs
 /build/Debug
 /build/Release
 _ReSharper*/
+/Zbu.ModelsBuilder.Console/build

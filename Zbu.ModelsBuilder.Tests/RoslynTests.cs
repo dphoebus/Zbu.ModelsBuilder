@@ -85,13 +85,13 @@ namespace Foo
             // http://msdn.microsoft.com/en-gb/vstudio/hh500769.aspx
             var tree = CSharpSyntaxTree.ParseText(code);
             //var mscorlib = new AssemblyFileReference(typeof(object).Assembly.Location);
-            var mscorlib = new MetadataFileReference(typeof (object).Assembly.Location);
+            var mscorlib = MetadataReference.CreateFromFile(typeof(object).Assembly.Location);
 
             // YES! adding the reference and Random1 is found by compilation
             // SO we can get rid of the OmitWhatever attribute!!!!
             // provided that we load everything that's in BIN as references
             // => the CodeInfos must be built on the SERVER and we send files to the SERVER.
-            var testslib = new MetadataFileReference(typeof (RoslynTests).Assembly.Location);
+            var testslib = MetadataReference.CreateFromFile(typeof(RoslynTests).Assembly.Location);
 
             var compilation = CSharpCompilation.Create(
                 "MyCompilation",
@@ -149,13 +149,19 @@ namespace Foo
         public void SemTestMissingReference()
         {
             const string code = @"
+using System.Collections.Generic;
+using Zbu.ModelsBuilder.Building;
 public class MyBuilder : Zbu.ModelsBuilder.Tests.TestBuilder
-{}
+{
+    public MyBuilder(IList<TypeModel> typeModels, ParseResult parseResult)
+        : base(typeModels, parseResult)
+    { }
+}
 ";
 
             var tree = CSharpSyntaxTree.ParseText(code);
-            var mscorlib = new MetadataFileReference(typeof(object).Assembly.Location);
-            var testslib = new MetadataFileReference(typeof(RoslynTests).Assembly.Location);
+            var mscorlib = MetadataReference.CreateFromFile(typeof(object).Assembly.Location);
+            var testslib = MetadataReference.CreateFromFile(typeof(RoslynTests).Assembly.Location);
 
             var compilation = CSharpCompilation.Create(
                 "MyCompilation",
@@ -163,7 +169,9 @@ public class MyBuilder : Zbu.ModelsBuilder.Tests.TestBuilder
                 references: new MetadataReference[] { mscorlib, testslib });
             var model = compilation.GetSemanticModel(tree);
 
-            // CS0012: Zbu.ModelsBuilder.Builder is referenced in an assembly that is not referenced
+            // CS0012: The type '...' is defined in an assembly that is not referenced
+            // CS0246: The type or namespace '...' could not be found
+            // CS0234: The nume or namespace name '...' does not exist in the namespace '...'
             var diags = model.GetDiagnostics();
             if (diags.Length > 0)
             {
@@ -173,20 +181,29 @@ public class MyBuilder : Zbu.ModelsBuilder.Tests.TestBuilder
                 }
             }
 
-            Assert.AreEqual(1, diags.Length);
-            Assert.AreEqual("CS0012", diags[0].Id);
+            //Assert.AreEqual(1, diags.Length);
+            Assert.GreaterOrEqual(diags.Length, 2);
+            
+            Assert.AreEqual("CS0234", diags[0].Id);
+            Assert.AreEqual("CS0012", diags[1].Id);
         }
 
         [Test]
         public void SemTestWithReferences()
         {
             const string code = @"
+using System.Collections.Generic;
+using Zbu.ModelsBuilder.Building;
 public class MyBuilder : Zbu.ModelsBuilder.Tests.TestBuilder
-{}
+{
+    public MyBuilder(IList<TypeModel> typeModels, ParseResult parseResult)
+        : base(typeModels, parseResult)
+    { }
+}
 ";
 
             var tree = CSharpSyntaxTree.ParseText(code);
-            var refs = AssemblyUtility.GetAllReferencedAssemblyLocations().Select(x => new MetadataFileReference(x));
+            var refs = AssemblyUtility.GetAllReferencedAssemblyLocations().Select(x => MetadataReference.CreateFromFile(x));
 
             var compilation = CSharpCompilation.Create(
                 "MyCompilation",
@@ -231,7 +248,7 @@ class SimpleClass
 }";
 
             var tree = CSharpSyntaxTree.ParseText(code);
-            var mscorlib = new MetadataFileReference(typeof(object).Assembly.Location);
+            var mscorlib = MetadataReference.CreateFromFile(typeof(object).Assembly.Location);
 
             var compilation = CSharpCompilation.Create(
                 "MyCompilation",
