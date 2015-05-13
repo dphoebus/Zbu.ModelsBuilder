@@ -126,9 +126,9 @@ namespace Zbu.ModelsBuilder.Building
 
                 sb.Append("\n\t{\n");
 
-                // write the properties - only the local ones, we're an interface
+                // write the properties - only the local (non-ignored) ones, we're an interface
                 var more = false;
-                foreach (var prop in type.Properties.OrderBy(x => x.ClrName))
+                foreach (var prop in type.Properties.Where(x => !x.IsIgnored).OrderBy(x => x.ClrName))
                 {
                     if (more) sb.Append("\n");
                     more = true;
@@ -148,9 +148,11 @@ namespace Zbu.ModelsBuilder.Building
             //    sb.AppendFormat("\t[ImplementContentType(\"{0}\")]\n", type.Alias);
             sb.AppendFormat("\t[PublishedContentModel(\"{0}\")]\n", type.Alias);
             sb.AppendFormat("\tpublic partial class {0}", type.ClrName);
-            var inherits = type.BaseType == null || type.BaseType.IsContentIgnored
-                ? (type.HasBase ? null : GetModelsBaseClassName())
-                : type.BaseType.ClrName;
+            var inherits = type.HasBase 
+                ? null // has its own base already
+                : (type.BaseType == null || type.BaseType.IsContentIgnored
+                    ? GetModelsBaseClassName()
+                    : type.BaseType.ClrName);
             if (inherits != null)
                 sb.AppendFormat(" : {0}", inherits);
 

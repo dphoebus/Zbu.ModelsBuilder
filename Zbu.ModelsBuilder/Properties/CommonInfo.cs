@@ -4,7 +4,7 @@ using System.Runtime.InteropServices;
 [assembly: AssemblyConfiguration("")]
 [assembly: AssemblyProduct("ZpqrtBnk Umbraco ModelsBuilder")]
 [assembly: AssemblyCompany("Pilotine - ZpqrtBnk")]
-[assembly: AssemblyCopyright("Copyright © Pilotine - ZpqrtBnk 2013-2014")]
+[assembly: AssemblyCopyright("Copyright © Pilotine - ZpqrtBnk 2013-2015")]
 [assembly: AssemblyTrademark("")]
 [assembly: AssemblyCulture("")]
 
@@ -28,11 +28,11 @@ using System.Runtime.InteropServices;
 // Also need to 
 
 // Assembly
-[assembly: AssemblyVersion("2.0.4.35")]
-[assembly: AssemblyFileVersion("2.0.4.35")]
+[assembly: AssemblyVersion("2.1.2.42")]
+[assembly: AssemblyFileVersion("2.1.2.42")]
 
 // NuGet Package
 // Note: cannot release "1.8.0" because it depends on pre-release NuGet packages
 // so I have to use 1.8.0-final...
-[assembly: AssemblyInformationalVersion("2.0.4-beta001")]
+[assembly: AssemblyInformationalVersion("2.1.2-final")]
 // Do not remove this line.

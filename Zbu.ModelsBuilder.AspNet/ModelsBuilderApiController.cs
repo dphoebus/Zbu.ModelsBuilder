@@ -56,20 +56,25 @@ namespace Zbu.ModelsBuilder.AspNet
             [DataMember]
             public string ClientVersionString
             {
-                get { return ClientVersion.ToString(); }
+                get { return VersionToString(ClientVersion); }
                 set { ClientVersion = ParseVersion(value, false, "client"); }
             }
 
             [DataMember]
             public string MinServerVersionSupportingClientString
             {
-                get { return MinServerVersionSupportingClient.ToString(); }
+                get { return VersionToString(MinServerVersionSupportingClient); }
                 set { MinServerVersionSupportingClient = ParseVersion(value, true, "minServer"); }
             }
 
             // not serialized
             public Version ClientVersion { get; set; }
             public Version MinServerVersionSupportingClient { get; set; }
+
+            private static string VersionToString(Version version)
+            {
+                return version == null ? "0.0.0.0" : version.ToString();
+            }
 
             private static Version ParseVersion(string value, bool canBeNull, string name)
             {
@@ -287,9 +292,10 @@ namespace Zbu.ModelsBuilder.AspNet
                     "API version conflict: client version (<null>) is not compatible with server version({0}).",
                     Compatibility.Version)));
 
+            // see also: CompatibilityTests
             var isOk = minServerVersionSupportingClient == null
-                ? Compatibility.IsCompatible(clientVersion) // clients up to 2.0.1, included
-                : Compatibility.IsCompatible(clientVersion, minServerVersionSupportingClient); // anything greater than 2.0.1
+                ? Compatibility.IsCompatible(clientVersion)
+                : Compatibility.IsCompatible(clientVersion, minServerVersionSupportingClient);
             var response = isOk ? null : Request.CreateResponse(HttpStatusCode.Forbidden, string.Format(
                 "API version conflict: client version ({0}) is not compatible with server version({1}).",
                 clientVersion, Compatibility.Version));
