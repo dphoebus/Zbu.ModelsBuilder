@@ -4,7 +4,7 @@ using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
 using NUnit.Framework;
-using Umbraco.ModelsBuilder.AspNet;
+using Umbraco.ModelsBuilder.Api;
 
 namespace Umbraco.ModelsBuilder.Tests
 {
@@ -42,7 +42,7 @@ using Umbraco.ModelsBuilder;
 [assembly:IgnoreContentType(""product"")]
 ";
 
-            var api = new ModelsBuilderApi("http://umbraco.local", "user", "password");
+            var api = new ApiClient("http://umbraco.local", "user", "password");
             var ourFiles = new Dictionary<string, string>
             {
                 {"file1", text1},

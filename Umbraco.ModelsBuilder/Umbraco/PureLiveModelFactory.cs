@@ -5,37 +5,60 @@ using System.Linq;
 using System.Linq.Expressions;
 using System.Reflection;
 using System.Text;
+using System.Text.RegularExpressions;
 using System.Threading;
+using System.Web;
 using System.Web.Compilation;
 using System.Web.Hosting;
+using System.Web.WebPages.Razor;
 using Umbraco.Core;
 using Umbraco.Core.Configuration;
 using Umbraco.Core.Logging;
 using Umbraco.Core.Models;
 using Umbraco.Core.Models.PublishedContent;
 using Umbraco.Web.Cache;
-using Umbraco.ModelsBuilder.AspNet;
 using Umbraco.ModelsBuilder.Building;
 using Umbraco.ModelsBuilder.Configuration;
 using File = System.IO.File;
 
 namespace Umbraco.ModelsBuilder.Umbraco
 {
-    public class PureLiveModelFactory : IPublishedContentModelFactory
+    class PureLiveModelFactory : IPublishedContentModelFactory, IRegisteredObject
     {
+        private Assembly _modelsAssembly;
         private Dictionary<string, Func<IPublishedContent, IPublishedContent>> _constructors;
         private readonly ReaderWriterLockSlim _locker = new ReaderWriterLockSlim();
-        private readonly IPureLiveModelsEngine[] _engines;
-        private bool _hasModels;
+        private volatile bool _hasModels; // volatile 'cos reading outside lock
         private bool _pendingRebuild;
         private readonly ProfilingLogger _logger;
+        private readonly FileSystemWatcher _watcher;
+        private int _ver;
 
-        public PureLiveModelFactory(ProfilingLogger logger, params IPureLiveModelsEngine[] engines)
+        public PureLiveModelFactory(ProfilingLogger logger)
         {
             _logger = logger;
-            _engines = engines;
+            _ver = 1; // zero is for when we had no version
             ContentTypeCacheRefresher.CacheUpdated += (sender, args) => ResetModels();
             DataTypeCacheRefresher.CacheUpdated += (sender, args) => ResetModels();
+            RazorBuildProvider.CodeGenerationStarted += RazorBuildProvider_CodeGenerationStarted;
+
+            if (!HostingEnvironment.IsHosted) return;
+
+            var appData = HostingEnvironment.MapPath("~/App_Data");
+            if (appData == null)
+                throw new Exception("Panic: appData is null.");
+
+            var modelsDirectory = Path.Combine(appData, "Models");
+            if (!Directory.Exists(modelsDirectory))
+                Directory.CreateDirectory(modelsDirectory);
+
+            // BEWARE! if the watcher is not properly released then for some reason the
+            // BuildManager will start confusing types - using a 'registered object' here
+            // though we should probably plug into Umbraco's MainDom - which is internal
+            HostingEnvironment.RegisterObject(this);
+            _watcher = new FileSystemWatcher(modelsDirectory);
+            _watcher.Changed += WatcherOnChanged;
+            _watcher.EnableRaisingEvents = true;
         }
 
         #region IPublishedContentModelFactory
@@ -45,7 +68,7 @@ namespace Umbraco.ModelsBuilder.Umbraco
             // get models, rebuilding them if needed
             var constructors = EnsureModels();
             if (constructors == null)
-                return null;
+                return content;
 
             // be case-insensitive
             var contentTypeAlias = content.DocumentTypeAlias;
@@ -61,6 +84,24 @@ namespace Umbraco.ModelsBuilder.Umbraco
         #endregion
 
         #region Compilation
+
+        private void RazorBuildProvider_CodeGenerationStarted(object sender, EventArgs e)
+        {
+            // just be safe - can happen if the first view is not an Umbraco view
+            if (_modelsAssembly == null) return;
+
+            _locker.EnterReadLock(); // that should ensure no race
+            try
+            {
+                _logger.Logger.Debug<PureLiveModelFactory>("RazorBuildProvider.CodeGenerationStarted");
+                var provider = sender as RazorBuildProvider;
+                provider?.AssemblyBuilder.AddAssemblyReference(_modelsAssembly);
+            }
+            finally
+            {
+                _locker.ExitReadLock();
+            }
+        }
 
         // tells the factory that it should build a new generation of models
         private void ResetModels()
@@ -79,7 +120,7 @@ namespace Umbraco.ModelsBuilder.Umbraco
         }
 
         // ensure that the factory is running with the lastest generation of models
-        private Dictionary<string, Func<IPublishedContent, IPublishedContent>> EnsureModels()
+        internal Dictionary<string, Func<IPublishedContent, IPublishedContent>> EnsureModels()
         {
             _logger.Logger.Debug<PureLiveModelFactory>("Ensuring models.");
             _locker.EnterReadLock();
@@ -101,25 +142,33 @@ namespace Umbraco.ModelsBuilder.Umbraco
                 // either they haven't been loaded from the cache yet
                 // or they have been reseted and are pending a rebuild
 
-                // this will lock the engines - must take care that whatever happens,
-                // we unlock them - even if generation failed for some reason
-                foreach (var engine in _engines)
-                    engine.NotifyRebuilding();
-
-                try
+                using (_logger.DebugDuration<PureLiveModelFactory>("Get models.", "Got models."))
                 {
-                    using (_logger.DebugDuration<PureLiveModelFactory>("Get models.", "Got models."))
+                    try
                     {
                         var assembly = GetModelsAssembly(_pendingRebuild);
+
+                        // the one below can be used to simulate an issue with BuildManager, ie it will register
+                        // the models with the factory but NOT with the BuildManager, which will not recompile views.
+                        // this is for U4-8043 which is an obvious issue but I cannot replicate
+                        //_modelsAssembly = _modelsAssembly ?? assembly;
+
+                        // the one below is the normal one
+                        _modelsAssembly = assembly;
+
                         var types = assembly.ExportedTypes.Where(x => x.Inherits<PublishedContentModel>());
                         _constructors = RegisterModels(types);
-                        _hasModels = true;
+                        ModelsGenerationError.Clear();
                     }
-                }
-                finally
-                {
-                    foreach (var engine in _engines)
-                        engine.NotifyRebuilt();
+                    catch (Exception e)
+                    {
+                        _logger.Logger.Error<PureLiveModelFactory>("Failed to build models.", e);
+                        _logger.Logger.Warn<PureLiveModelFactory>("Running without models."); // be explicit
+                        ModelsGenerationError.Report("Failed to build PureLive models.", e);
+                        _modelsAssembly = null;
+                        _constructors = null;
+                    }
+                    _hasModels = true;
                 }
 
                 return _constructors;
@@ -129,6 +178,8 @@ namespace Umbraco.ModelsBuilder.Umbraco
                 _locker.ExitWriteLock();
             }
         }
+
+        private static readonly Regex AssemblyVersionRegex = new Regex("AssemblyVersion\\(\"[0-9]+.[0-9]+.[0-9]+.[0-9]+\"\\)", RegexOptions.Compiled);
 
         private Assembly GetModelsAssembly(bool forceRebuild)
         {
@@ -151,68 +202,73 @@ namespace Umbraco.ModelsBuilder.Umbraco
             var typeModels = umbraco.GetAllTypes();
             var currentHash = Hash(ourFiles, typeModels);
             var modelsHashFile = Path.Combine(modelsDirectory, "models.hash");
-            var modelsDllFile = Path.Combine(modelsDirectory, "models.dll");
-            Assembly assembly;
+            var modelsSrcFile = Path.Combine(modelsDirectory, "models.generated.cs");
+            var projFile = Path.Combine(modelsDirectory, "all.generated.cs");
+            var projVirt = "~/App_Data/Models/all.generated.cs";
+
+            // caching the generated models speeds up booting
+            // if you change your own partials, delete the .generated.cs file to force a rebuild
+
+            if (!forceRebuild)
+            {
+                _logger.Logger.Debug<PureLiveModelFactory>("Looking for cached models.");
+                if (File.Exists(modelsHashFile) && File.Exists(projFile))
+                {
+                    var cachedHash = File.ReadAllText(modelsHashFile);
+                    if (currentHash != cachedHash)
+                    {
+                        _logger.Logger.Debug<PureLiveModelFactory>("Found obsolete cached models.");
+                        forceRebuild = true;
+                    }
+                }
+                else
+                {
+                    _logger.Logger.Debug<PureLiveModelFactory>("Could not find cached models.");
+                    forceRebuild = true;
+                }
+            }
 
             if (forceRebuild == false)
             {
-                assembly = TryToLoadCachedModelsAssembly(modelsHashFile, modelsDllFile, currentHash);
-                if (assembly != null)
-                    return assembly;
+                _logger.Logger.Debug<PureLiveModelFactory>("Loading cached models.");
+
+                // mmust reset the version in the file else it would keep growing
+                // loading cached modules only happens when the app restarts
+                var text = File.ReadAllText(projFile);
+                var match = AssemblyVersionRegex.Match(text);
+                if (match.Success)
+                {
+                    text = text.Replace(match.Value, "AssemblyVersion(\"0.0.0." + _ver++ + "\")");
+                    File.WriteAllText(projFile, text);
+                }
+
+                return BuildManager.GetCompiledAssembly(projVirt);
             }
 
             // need to rebuild
             _logger.Logger.Debug<PureLiveModelFactory>("Rebuilding models.");
 
-            // generate code
+            // generate code, save
             var code = GenerateModelsCode(ourFiles, typeModels);
-            code = RoslynRazorViewCompiler.PrepareCodeForCompilation(code);
+            // add extra attributes,
+            //  PureLiveAssembly helps identifying Assemblies that contain PureLive models
+            //  AssemblyVersion is so that we have a different version for each rebuild
+            code = code.Replace("//ASSATTR", "[assembly: PureLiveAssembly, System.Reflection.AssemblyVersion(\"0.0.0." + _ver++ + "\")]");
+            File.WriteAllText(modelsSrcFile, code);
 
-            // save code for debug purposes
-            var modelsCodeFile = Path.Combine(modelsDirectory, "models.generated.cs");
-            File.WriteAllText(modelsCodeFile, code);
+            // generate proj, save
+            ourFiles["models.generated.cs"] = code;
+            var proj = GenerateModelsProj(ourFiles);
+            File.WriteAllText(projFile, proj);
 
             // compile and register
-            byte[] bytes;
-            assembly = RoslynRazorViewCompiler.CompileAndRegisterModels(code, out bytes);
+            var assembly = BuildManager.GetCompiledAssembly(projVirt);
 
             // assuming we can write and it's not going to cause exceptions...
-            File.WriteAllBytes(modelsDllFile, bytes);
             File.WriteAllText(modelsHashFile, currentHash);
 
             _logger.Logger.Debug<PureLiveModelFactory>("Done rebuilding.");
             return assembly;
-        }
-
-        private Assembly TryToLoadCachedModelsAssembly(string modelsHashFile, string modelsDllFile, string currentHash)
-        {
-            _logger.Logger.Debug<PureLiveModelFactory>("Looking for cached models.");
-
-            if (!File.Exists(modelsHashFile) || !File.Exists(modelsDllFile))
-            {
-                _logger.Logger.Debug<PureLiveModelFactory>("Could not find cached models.");
-                return null;
-            }
-
-            var cachedHash = File.ReadAllText(modelsHashFile);
-            if (currentHash != cachedHash)
-            {
-                _logger.Logger.Debug<PureLiveModelFactory>("Found obsolete cached models.");
-                return null;
-            }
-
-            _logger.Logger.Debug<PureLiveModelFactory>("Found cached models, loading.");
-            try
-            {
-                var rawAssembly = File.ReadAllBytes(modelsDllFile);
-                var assembly = RoslynRazorViewCompiler.RegisterModels(rawAssembly);
-                return assembly;
-            }
-            catch (Exception e)
-            {
-                _logger.Logger.Error<PureLiveModelFactory>("Failed to load cached models.", e);
-                return null;
-            }
         }
 
         private static Dictionary<string, Func<IPublishedContent, IPublishedContent>> RegisterModels(IEnumerable<Type> types)
@@ -254,10 +310,7 @@ namespace Umbraco.ModelsBuilder.Umbraco
             foreach (var file in Directory.GetFiles(modelsDirectory, "*.generated.cs"))
                 File.Delete(file);
 
-            // using BuildManager references
-            var referencedAssemblies = BuildManager.GetReferencedAssemblies().Cast<Assembly>().ToArray();
-
-            var parseResult = new CodeParser().Parse(ourFiles, referencedAssemblies);
+            var parseResult = new CodeParser().ParseWithReferencedAssemblies(ourFiles);
             var builder = new TextBuilder(typeModels, parseResult, UmbracoConfig.For.ModelsBuilder().ModelsNamespace);
 
             var codeBuilder = new StringBuilder();
@@ -265,6 +318,59 @@ namespace Umbraco.ModelsBuilder.Umbraco
             var code = codeBuilder.ToString();
 
             return code;
+        }
+
+        private static readonly Regex UsingRegex = new Regex("^using(.*);", RegexOptions.Compiled | RegexOptions.Multiline);
+        private static readonly Regex AattrRegex = new Regex("^\\[assembly:(.*)\\]", RegexOptions.Compiled | RegexOptions.Multiline);
+
+        private static string GenerateModelsProj(IDictionary<string, string> files)
+        {
+            // ideally we would generate a CSPROJ file but then we'd need a BuildProvider for csproj
+            // trying to keep things simple for the time being, just write everything to one big file
+
+            // group all 'using' at the top of the file (else fails)
+            var usings = new List<string>();
+            foreach (var k in files.Keys.ToList())
+                files[k] = UsingRegex.Replace(files[k], m =>
+                {
+                    usings.Add(m.Groups[1].Value);
+                    return string.Empty;
+                });
+
+            // group all '[assembly:...]' at the top of the file (else fails)
+            var aattrs = new List<string>();
+            foreach (var k in files.Keys.ToList())
+                files[k] = AattrRegex.Replace(files[k], m =>
+                {
+                    aattrs.Add(m.Groups[1].Value);
+                    return string.Empty;
+                });
+
+            var text = new StringBuilder();
+            foreach (var u in usings.Distinct())
+            {
+                text.Append("using ");
+                text.Append(u);
+                text.Append(";\r\n");
+            }
+            foreach (var a in aattrs)
+            {
+                text.Append("[assembly:");
+                text.Append(a);
+                text.Append("]\r\n");
+            }
+            text.Append("\r\n\r\n");
+            foreach (var f in files)
+            {
+                text.Append("// FILE: ");
+                text.Append(f.Key);
+                text.Append("\r\n\r\n");
+                text.Append(f.Value);
+                text.Append("\r\n\r\n\r\n");
+            }
+            text.Append("// EOF\r\n");
+
+            return text.ToString();
         }
 
         #endregion
@@ -305,6 +411,23 @@ namespace Umbraco.ModelsBuilder.Umbraco
             }
 
             return hash.GetCombinedHashCode();
+        }
+
+        #endregion
+
+        #region Watching
+
+        private void WatcherOnChanged(object sender, FileSystemEventArgs args)
+        {
+            if (_hasModels)
+                ResetModels();
+        }
+
+        public void Stop(bool immediate)
+        {
+            _watcher.EnableRaisingEvents = false;
+            _watcher.Dispose();
+            HostingEnvironment.UnregisterObject(this);
         }
 
         #endregion

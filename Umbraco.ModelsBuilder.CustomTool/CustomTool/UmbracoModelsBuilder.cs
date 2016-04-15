@@ -4,6 +4,7 @@ using System.Linq;
 using System.Runtime.InteropServices;
 using System.Text;
 using Microsoft.VisualStudio.Shell.Interop;
+using Umbraco.ModelsBuilder.Api;
 using Umbraco.ModelsBuilder.Building;
 using Umbraco.ModelsBuilder.CustomTool.VisualStudio;
 
@@ -11,7 +12,7 @@ namespace Umbraco.ModelsBuilder.CustomTool.CustomTool
 {
     [ComVisible(true)]
     public abstract class UmbracoModelsBuilder : BaseCodeGeneratorWithSite
-    { 
+    {
         #region IVsSingleFileGenerator Members
 
         protected override int Generate(string wszInputFilePath,
@@ -88,7 +89,7 @@ namespace Umbraco.ModelsBuilder.CustomTool.CustomTool
                 var options = VisualStudioHelper.GetOptions();
                 options.Validate();
 
-                var api = new AspNet.ModelsBuilderApi(options.UmbracoUrl, options.UmbracoUser, options.UmbracoPassword);
+                var api = new ApiClient(options.UmbracoUrl, options.UmbracoUser, options.UmbracoPassword);
                 api.ValidateClientVersion(); // so we get a meaningful error message first
 
                 // exclude .generated.cs files but don't delete them now, should anything go wrong
@@ -118,7 +119,7 @@ namespace Umbraco.ModelsBuilder.CustomTool.CustomTool
 
                 // we need to generate something
                 var code = new StringBuilder();
-                TextBuilder.WriteHeader(code);
+                TextHeaderWriter.WriteHeader(code);
                 code.Append("// Umbraco ModelsBuilder\n");
                 code.AppendFormat("// {0:yyyy-MM-ddTHH:mm:ssZ}", DateTime.UtcNow);
 

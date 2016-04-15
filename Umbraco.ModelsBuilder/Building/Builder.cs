@@ -20,10 +20,10 @@ namespace Umbraco.ModelsBuilder.Building
     /// <summary>
     /// Provides a base class for all builders.
     /// </summary>
-    public abstract class Builder
+    internal abstract class Builder
     {
         private readonly IList<TypeModel> _typeModels;
-        protected ParseResult ParseResult { get; private set; }
+        protected ParseResult ParseResult { get; }
 
         // the list of assemblies that will be 'using' by default
         protected readonly IList<string> TypesUsing = new List<string>
@@ -48,7 +48,7 @@ namespace Umbraco.ModelsBuilder.Building
         /// <summary>
         /// Gets the list of assemblies to add to the set of 'using' assemblies in each model file.
         /// </summary>
-        public IList<string> Using { get { return TypesUsing; } }
+        public IList<string> Using => TypesUsing;
 
         /// <summary>
         /// Gets the list of models to generate.
@@ -63,7 +63,7 @@ namespace Umbraco.ModelsBuilder.Building
         /// Gets the list of all models.
         /// </summary>
         /// <remarks>Includes those that are ignored.</remarks>
-        internal IList<TypeModel> TypeModels { get { return _typeModels; } }
+        internal IList<TypeModel> TypeModels => _typeModels;
 
         /// <summary>
         /// Initializes a new instance of the <see cref="Builder"/> class with a list of models to generate
@@ -74,9 +74,9 @@ namespace Umbraco.ModelsBuilder.Building
         protected Builder(IList<TypeModel> typeModels, ParseResult parseResult)
         {
             if (typeModels == null)
-                throw new ArgumentNullException("typeModels");
+                throw new ArgumentNullException(nameof(typeModels));
             if (parseResult == null)
-                throw new ArgumentNullException("parseResult");
+                throw new ArgumentNullException(nameof(parseResult));
 
             _typeModels = typeModels;
             ParseResult = parseResult;
@@ -165,6 +165,13 @@ namespace Umbraco.ModelsBuilder.Building
                         + $" is used for properties with alias {string.Join(", ", xx.Select(x => "\"" + x.Alias + "\""))}. Names have to be unique."
                         + " Consider using an attribute to assign different names to conflicting properties.");
 
+            // ensure content & property type don't have identical name (csharp hates it)
+            foreach (var typeModel in _typeModels.Where(x => !x.IsContentIgnored))
+                foreach (var xx in typeModel.Properties.Where(x => !x.IsIgnored && x.ClrName == typeModel.ClrName))
+                    throw new InvalidOperationException($"The model class for content type with alias \"{typeModel.Alias}\" is named \"{xx.ClrName}\"."
+                        + $" CSharp does not support using the same name for the property with alias \"{xx.Alias}\"."
+                        + " Consider using an attribute to assign a different name to the property.");
+
             // ensure we have no collision between base types
             // NO: we may want to define a base class in a partial, on a model that has a parent
             // we are NOT checking that the defined base type does maintain the inheritance chain
@@ -229,16 +236,10 @@ namespace Umbraco.ModelsBuilder.Building
 
             codeBuilder.AppendFormat("namespace {0}\n{{ }}\n", GetModelsNamespace());
 
-            var tree = CSharpSyntaxTree.ParseText(codeBuilder.ToString());
-
-            var refs = AssemblyUtility.AllReferencedAssemblyLocations
-                .Distinct() // else massively duplicated...
-                .Select(x => MetadataReference.CreateFromFile(x));
-
-            var compilation = CSharpCompilation.Create(
-                "MyCompilation",
-                syntaxTrees: new[] { tree },
-                references: refs);
+            var compiler = new Compiler();
+            SyntaxTree[] trees;
+            var compilation = compiler.GetCompilation("MyCompilation", new Dictionary<string, string> { { "code", codeBuilder.ToString() } }, out trees);
+            var tree = trees[0];
             _ambiguousSymbolsModel = compilation.GetSemanticModel(tree);
 
             var namespaceSyntax = tree.GetRoot().DescendantNodes().OfType<NamespaceDeclarationSyntax>().First();
@@ -246,14 +247,27 @@ namespace Umbraco.ModelsBuilder.Building
             _ambiguousSymbolsPos = namespaceSyntax.OpenBraceToken.SpanStart;
         }
 
-        protected bool IsAmbiguousSymbol(string symbol)
+        // looking for a simple symbol eg 'Umbraco' or 'String'
+        // expecting to match eg 'Umbraco' or 'System.String'
+        // returns true if either
+        // - more than 1 symbol is found (explicitely ambiguous)
+        // - 1 symbol is found BUT not matching (implicitely ambiguous)
+        protected bool IsAmbiguousSymbol(string symbol, string match)
         {
             if (_ambiguousSymbolsModel == null)
                 PrepareAmbiguousSymbols();
             if (_ambiguousSymbolsModel == null)
                 throw new Exception("Could not prepare ambiguous symbols.");
             var symbols = _ambiguousSymbolsModel.LookupNamespacesAndTypes(_ambiguousSymbolsPos, null, symbol);
-            return symbols.Length > 1;
+
+            if (symbols.Length > 1) return true;
+            if (symbols.Length == 0) return false; // what else?
+
+            // only 1 - ensure it matches
+            var found = symbols[0].ToDisplayString();
+            var pos = found.IndexOf('<'); // generic?
+            if (pos > 0) found = found.Substring(0, pos); // strip
+            return found != match; // and compare
         }
 
         internal string ModelsNamespaceForTests;

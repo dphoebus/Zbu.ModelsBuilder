@@ -17,3 +17,4 @@ build/nuget.exe
 Umbraco.ModelsBuilder/App_Data/NuGetBackup/*
 _ReSharper*/
 /Zbu.ModelsBuilder.Console/build
+.Umbraco.ModelsBuilder.boltdata/*

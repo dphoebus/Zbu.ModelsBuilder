@@ -1,12 +1,9 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Linq;
-using System.Reflection;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
-using Umbraco.Core.Configuration;
-using Umbraco.ModelsBuilder.Configuration;
 
 namespace Umbraco.ModelsBuilder.Building
 {
@@ -14,7 +11,7 @@ namespace Umbraco.ModelsBuilder.Building
     /// Implements code parsing.
     /// </summary>
     /// <remarks>Parses user's code and look for generator's instructions.</remarks>
-    public class CodeParser
+    internal class CodeParser
     {
         /// <summary>
         /// Parses a set of file.
@@ -24,22 +21,20 @@ namespace Umbraco.ModelsBuilder.Building
         /// <remarks>The set of files is a dictionary of name, content.</remarks>
         public ParseResult Parse(IDictionary<string, string> files)
         {
-            return Parse(files, Enumerable.Empty<Assembly>());
+            return Parse(files, Enumerable.Empty<PortableExecutableReference>());
         }
 
         /// <summary>
         /// Parses a set of file.
         /// </summary>
         /// <param name="files">A set of (filename,content) representing content to parse.</param>
-        /// <param name="referencedAssemblies">Assemblies to reference in compilations.</param>
+        /// <param name="references">Assemblies to reference in compilations.</param>
         /// <returns>The result of the code parsing.</returns>
         /// <remarks>The set of files is a dictionary of name, content.</remarks>
-        public ParseResult Parse(IDictionary<string, string> files, IEnumerable<Assembly> referencedAssemblies)
+        public ParseResult Parse(IDictionary<string, string> files, IEnumerable<PortableExecutableReference> references)
         {
             SyntaxTree[] trees;
-            var compiler = new Compiler(UmbracoConfig.For.ModelsBuilder().LanguageVersion);
-            foreach (var asm in referencedAssemblies)
-                compiler.ReferencedAssemblies.Add(asm);
+            var compiler = new Compiler { References = references };
             var compilation = compiler.GetCompilation("Umbraco.ModelsBuilder.Generated", files, out trees);
 
             var disco = new ParseResult();
@@ -47,6 +42,11 @@ namespace Umbraco.ModelsBuilder.Building
                 Parse(disco, compilation, tree);
 
             return disco;
+        }
+
+        public ParseResult ParseWithReferencedAssemblies(IDictionary<string, string> files)
+        {
+            return Parse(files, ReferencedAssemblies.References);
         }
 
         private static void Parse(ParseResult disco, CSharpCompilation compilation, SyntaxTree tree)
@@ -76,7 +76,7 @@ namespace Umbraco.ModelsBuilder.Building
                         if (x.IsStatic) return false;
                         if (x.Parameters.Length != 1) return false;
                         var type1 = x.Parameters[0].Type;
-                        var type2 = typeof (global::Umbraco.Core.Models.IPublishedContent);
+                        var type2 = typeof (Core.Models.IPublishedContent);
                         return type1.ToDisplayString() == type2.FullName;
                     });
 
@@ -149,6 +149,7 @@ namespace Umbraco.ModelsBuilder.Building
                 if (attrData.AttributeConstructor == null) continue;
 
                 var attrClassName = SymbolDisplay.ToDisplayString(attrClassSymbol);
+                // ReSharper disable once SwitchStatementMissingSomeCases
                 switch (attrClassName)
                 {
                     case "Umbraco.ModelsBuilder.ImplementPropertyTypeAttribute":
@@ -190,7 +191,7 @@ namespace Umbraco.ModelsBuilder.Building
                     case "Umbraco.ModelsBuilder.ModelsBaseClassAttribute":
                         var modelsBaseClass = (INamedTypeSymbol) attrData.ConstructorArguments[0].Value;
                         if (modelsBaseClass is IErrorTypeSymbol)
-                            throw new Exception(string.Format("Invalid base class type \"{0}\".", modelsBaseClass.Name));
+                            throw new Exception($"Invalid base class type \"{modelsBaseClass.Name}\".");
                         disco.SetModelsBaseClassName(SymbolDisplay.ToDisplayString(modelsBaseClass));
                         break;
 
@@ -211,7 +212,7 @@ namespace Umbraco.ModelsBuilder.Building
         {
             var methodSymbol = symbol as IMethodSymbol;
 
-            if (methodSymbol == null 
+            if (methodSymbol == null
                 || !methodSymbol.IsStatic
                 || methodSymbol.IsGenericMethod
                 || methodSymbol.ReturnsVoid
